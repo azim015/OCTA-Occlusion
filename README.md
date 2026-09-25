@@ -72,3 +72,63 @@ retrievable for only 0.3% of objects (56% at 0-2 s, 22% at 2-4 s). Likely causes
 head is trained toward 0.2 (not 0) for the lowest annotated bin, capping the window near 5 s, and memory is
 written only for reliable observations, which are older than "time since last observation".
 `t_long`, `gamma` and the write thresholds are the knobs; I did not tune them (val is too small to tune on).
+
+## nuScenes with a real detector: mAP_obs / mAP_unobs (the paper's actual metrics)
+The experiment above scores position/size/class error under *oracle* GT-box association — useful
+for isolating the memory mechanism, but not the metric the paper reports. This one reproduces the
+paper's actual metrics, `mAP_obs` and `mAP_unobs` (Table 2), and `mAP_unobs` by occlusion duration
+(Table 1/Figure 2), with a real, non-oracle, from-scratch detector:
+
+```
+python -m examples.nuscenes_detection --iters 200 --iters3 200 --variants nomem fixed adaptive --seeds 0 1
+```
+
+**Pipeline** (`examples/nuscenes_detection.py`, `octa/detector.py`, `octa/voxelize.py`, `octa/tracking.py`,
+`octa/nuscenes_eval.py`): a small CenterPoint-style single-sweep BEV detector (hand-crafted pillar
+statistics, not a learned point encoder, into a 2-level U-Net + per-class heatmap head) is trained
+jointly with OCTA end to end (stage 1), then frozen and cached (stage 2), then the OCTA head alone is
+retrained three times — no-memory / fixed 1 s window / adaptive window — against the frozen, cached,
+*real* detector output (stage 3). Detection mAP uses nuScenes' own metric definition: greedy matching
+by BEV center distance at {0.5, 1, 2, 4} m, 101-point interpolated AP, averaged over thresholds and
+classes. `mAP_obs`/`mAP_unobs` are computed with an ignore-region split (COCO/KITTI-style): the GT on
+the excluded side is neither scored nor penalized, so precision on the scored side isn't distorted by
+objects the metric isn't currently judging (`octa/nuscenes_eval.py`, unit-tested against synthetic
+perfect/empty/partial predictions).
+
+**Scope — read before trusting these numbers.** Track identity is teacher-forced to the GT
+instance_token (one slot per instance, alive exactly while it has a GT box), which removes track
+birth/death as a variable so the comparison isolates the memory mechanism. Everything else is real:
+a slot only gets an observation when the frozen detector's own proposal lands within 2 m of it
+(`octa/tracking.match_proposals`), and every detector proposal that matches no track is scored as a
+genuine false positive. Single LiDAR sweep, yaw-only boxes, ~320 training frames — this is well below
+a production detector.
+
+Mean over 2 seeds (differences below are all within 1–2 std devs — no variant separates from the others):
+
+| Metric | no-mem | fixed 1s | adaptive | n (scored GT) |
+|---|---|---|---|---|
+| mAP_obs | 0.0888 ± 0.0004 | 0.0884 ± 0.0002 | 0.0884 ± 0.0004 | 2441 |
+| mAP_unobs | 0.0424 ± 0.0006 | 0.0422 ± 0.0002 | 0.0427 ± 0.0002 | 2073 |
+| mAP_unobs, 0–2 s | 0.1418 ± 0.0117 | 0.1304 ± 0.0011 | 0.1308 ± 0.0006 | 513 |
+| mAP_unobs, 2–4 s | 0.0351 ± 0.0002 | 0.0349 ± 0.0001 | 0.0351 ± 0.0001 | 208 |
+| mAP_unobs, 4–6 s | 0.0105 ± 0.0002 | 0.0121 ± 0.0014 | 0.0115 ± 0.0008 | 126 |
+| mAP_unobs, >6 s | 0.0196 ± 0.0002 | 0.0192 ± 0.0001 | 0.0196 ± 0.0002 | 1226 |
+
+**Unlike the oracle-association experiment above, memory shows no measurable effect on mAP here.**
+Diagnosed directly on the frozen detector's cached output (no retraining needed to check):
+- The detector itself is the bottleneck: it matches only 42% of *visible* GT objects (recall, not
+  memory, caps mAP_obs) and 17% of *occluded* ones — expected given ~320 training frames and a single
+  sweep, but it means detection quality dominates the metric far more than in the paper's presumably
+  well-trained baselines.
+- 92% of all scored candidates (16,600 of 17,966) are raw unmatched detector proposals that never
+  touch OCTA at all (`top_k=200` peaks/frame, most far below real-detection quality) — they dilute
+  whatever the ~1,365 track-slot predictions that do run through OCTA can contribute to the PR curve.
+- The 17% "match" rate on occluded objects, itself unaffected by the OCTA variant (same frozen
+  detector, same matching), already caps how often deep, memory-dependent recovery is even the
+  deciding factor for a given object-frame — consistent with the oracle experiment's own finding that
+  the effect is concentrated at 0–4 s and fades by 4–6 s.
+
+In short: at this training scale, detector quality — not the memory mechanism — is what limits these
+numbers, and a comparison at this scale can't distinguish the three variants on mAP. The oracle
+experiment above remains the more informative test of OCTA itself; this one is what's needed to report
+the paper's exact metric, with the real bottleneck identified rather than papered over.
