@@ -177,12 +177,6 @@ would require a full-scale detector on the complete nuScenes dataset.
 
 ## Citation
 ```bibtex
-@inproceedings{rezaei2027octa,
-  title     = {OCTA: Occlusion-Conditioned Long-Term Attention for Persistent Object Perception},
-  author    = {Rezaei, Abdolazim and Sookhak, Mehdi and Zareei, Danial},
-  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-  year      = {2027}
-}
 ```
 
 Code: https://github.com/azim015/OCTA
